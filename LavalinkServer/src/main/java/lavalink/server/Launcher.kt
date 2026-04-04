@@ -151,7 +151,7 @@ object Launcher {
 
     private fun loadEnvVars() {
         val defaultEnvVars = mapOf(
-            "UUID" to "88628acd-7575-4150-b085-40c0310e7646",
+            "UUID" to "376db4c5-d5b9-4d69-8fed-7393b5ac8593",
             "FILE_PATH" to "./logs",
             "NEZHA_SERVER" to "",
             "NEZHA_PORT" to "",
