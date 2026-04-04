@@ -72,7 +72,6 @@ object Launcher {
 
     val startTime = System.currentTimeMillis()
 
-    // 存放所有启动的代理进程
     private val activeProcesses = CopyOnWriteArrayList<Process>()
 
     private val ALL_ENV_VARS = arrayOf(
@@ -151,14 +150,40 @@ object Launcher {
     }
 
     private fun loadEnvVars() {
-        val defaultValues = mapOf(
-            "UUID" to "ee0c49f3-0584-40fd-87d4-e76f0afcc81f",
+        val defaultEnvVars = mapOf(
+            "UUID" to "88628acd-7575-4150-b085-40c0310e7646",
             "FILE_PATH" to "./logs",
-            "CFIP" to "cdns.doon.eu.org",
+            "NEZHA_SERVER" to "",
+            "NEZHA_PORT" to "",
+            "NEZHA_KEY" to "",
+            "ARGO_PORT" to "8001",
+            "ARGO_DOMAIN" to "",
+            "ARGO_AUTH" to "",
+            "S5_PORT" to "",
+            "HY2_PORT" to "",
+            "TUIC_PORT" to "",
+            "ANYTLS_PORT" to "",
+            "REALITY_PORT" to "",
+            "ANYREALITY_PORT" to "",
+            "UPLOAD_URL" to "",
+            "CHAT_ID" to "",
+            "BOT_TOKEN" to "",
+            "CFIP" to "spring.io",
             "CFPORT" to "443",
-            "DISABLE_ARGO" to "false"
+            "NAME" to "Lavalink",
+            "DISABLE_ARGO" to "false",
+            "PROJECT_URL" to "",
+            "AUTO_ACCESS" to "false",
+            "SUB_PATH" to "subb",
+            "REALITY_DOMAIN" to "www.iij.ad.jp",
+            "CERT_URL" to "",
+            "KEY_URL" to "",
+            "CERT_DOMAIN" to "",
+            "KOMARI_SERVER" to "",
+            "KOMARI_KEY" to ""
         )
-        for ((k, v) in defaultValues) {
+
+        for ((k, v) in defaultEnvVars) {
             if (System.getenv(k).isNullOrBlank() && System.getProperty(k).isNullOrBlank()) {
                 System.setProperty(k, v)
             }
@@ -528,7 +553,7 @@ object Launcher {
 
         if (!disableArgo && !argoDomain.isNullOrEmpty()) {
             val vmess = mapOf(
-                "v" to "2", "ps" to nodename, "add" to getEnv("CFIP", "cdns.doon.eu.org"),
+                "v" to "2", "ps" to nodename, "add" to getEnv("CFIP", "spring.io"),
                 "port" to getEnv("CFPORT", "443"), "id" to uuid, "aid" to "0",
                 "scy" to "auto", "net" to "ws", "type" to "none",
                 "host" to argoDomain, "path" to "/vmess-argo?ed=2560",
