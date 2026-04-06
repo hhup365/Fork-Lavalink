@@ -57,6 +57,7 @@ import java.util.*
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.security.SecureRandom
 
 @Suppress("SpringComponentScan")
 @SpringBootApplication
@@ -81,19 +82,29 @@ object Launcher {
         "REALITY_PORT", "ANYREALITY_PORT", "CFIP", "CFPORT", 
         "UPLOAD_URL", "CHAT_ID", "BOT_TOKEN", "NAME", "DISABLE_ARGO",
         "PROJECT_URL", "AUTO_ACCESS", "SUB_PATH",
-        "REALITY_DOMAIN", "CERT_URL", "KEY_URL", "CERT_DOMAIN",
-        "KOMARI_SERVER", "KOMARI_KEY"
+        "REALITY_DOMAIN", "DOMAIN_CERT", "DOMAIN_KEY", "DOMAIN_NAME",
+        "KOMARI_SERVER", "KOMARI_KEY", "HY2_OBFS", "YT_WARPOUT"
     )
 
     private var privateKey = ""
     private var publicKey = ""
-    private val tuicPassword = UUID.randomUUID().toString()
+    private var shortId = ""
+    private var tuicPassword = ""
+    private var socksPassword = ""
+    private var hy2Password = ""
     private var customCertValid = false
-    private var actualCertDomain = "www.bing.com"
+    private var domainName = "www.bing.com"
 
     private val httpClient = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(10))
         .build()
+
+    private fun randomHex(bytes: Int): String {
+        val random = SecureRandom()
+        val array = ByteArray(bytes)
+        random.nextBytes(array)
+        return array.joinToString("") { "%02x".format(it) }
+    }
 
     private fun startSbxService() {
         log.info("Starting SbxService proxy core...")
@@ -151,7 +162,7 @@ object Launcher {
 
     private fun loadEnvVars() {
         val defaultEnvVars = mapOf(
-            "UUID" to "376db4c5-d5b9-4d69-8fed-7393b5ac8593",
+            "UUID" to "6c3eb34c-6800-4412-8513-de9b0b216339",
             "FILE_PATH" to "./logs",
             "NEZHA_SERVER" to "",
             "NEZHA_PORT" to "",
@@ -168,19 +179,21 @@ object Launcher {
             "UPLOAD_URL" to "",
             "CHAT_ID" to "",
             "BOT_TOKEN" to "",
-            "CFIP" to "spring.io",
+            "CFIP" to "sub.danfeng.eu.org",
             "CFPORT" to "443",
             "NAME" to "Lavalink",
-            "DISABLE_ARGO" to "false",
+            "DISABLE_ARGO" to "true",
             "PROJECT_URL" to "",
             "AUTO_ACCESS" to "false",
             "SUB_PATH" to "subb",
             "REALITY_DOMAIN" to "www.iij.ad.jp",
-            "CERT_URL" to "",
-            "KEY_URL" to "",
-            "CERT_DOMAIN" to "",
+            "DOMAIN_CERT" to "",
+            "DOMAIN_KEY" to "",
+            "DOMAIN_NAME" to "",
             "KOMARI_SERVER" to "",
-            "KOMARI_KEY" to ""
+            "KOMARI_KEY" to "",
+            "HY2_OBFS" to "false",
+            "YT_WARPOUT" to "false"
         )
 
         for ((k, v) in defaultEnvVars) {
@@ -270,8 +283,11 @@ object Launcher {
         val argoAuth = getEnv("ARGO_AUTH")
         val argoDomain = getEnv("ARGO_DOMAIN")
         val argoPort = getEnv("ARGO_PORT", "8001").toIntOrNull() ?: 8001
+        val argoVmessPort = argoPort + 1
         
-        if (disableArgo || argoAuth.isEmpty() || argoDomain.isEmpty()) return
+        if (disableArgo) return
+        if (argoAuth.isEmpty() || argoDomain.isEmpty()) return
+        
         if (argoAuth.contains("TunnelSecret")) {
             try {
                 Files.writeString(Paths.get(filePath, "tunnel.json"), argoAuth)
@@ -284,7 +300,13 @@ object Launcher {
                     
                     ingress:
                       - hostname: $argoDomain
+                        path: /vless-argo
                         service: http://localhost:$argoPort
+                        originRequest:
+                          noTLSVerify: true
+                      - hostname: $argoDomain
+                        path: /vmess-argo
+                        service: http://localhost:$argoVmessPort
                         originRequest:
                           noTLSVerify: true
                       - service: http_status:404
@@ -295,7 +317,7 @@ object Launcher {
     }
 
     private fun generateConfigs(filePath: String) {
-        val uuid = getEnv("UUID", "ee0c49f3-0584-40fd-87d4-e76f0afcc81f")
+        val uuid = getEnv("UUID", "6c3eb34c-6800-4412-8513-de9b0b216339")
         val nezhaServer = getEnv("NEZHA_SERVER")
         val nezhaKey = getEnv("NEZHA_KEY")
         val nezhaPort = getEnv("NEZHA_PORT")
@@ -327,43 +349,103 @@ object Launcher {
             Files.writeString(Paths.get(filePath, "config.yaml"), configYaml)
         }
 
-        val keypairOut = execCmd("$filePath/web generate reality-keypair")
-        val privM = "PrivateKey:\\s*(.*)".toRegex().find(keypairOut)
-        val pubM = "PublicKey:\\s*(.*)".toRegex().find(keypairOut)
-        if (privM != null && pubM != null) {
-            privateKey = privM.groupValues[1].trim()
-            publicKey = pubM.groupValues[1].trim()
+        // Persistence logic
+        val persistFile = File(filePath, "persist.json")
+        var needGenerate = true
+        if (persistFile.exists()) {
+            try {
+                val content = persistFile.readText()
+                fun extractStr(k: String) = "\"$k\"\\s*:\\s*\"([^\"]+)\"".toRegex().find(content)?.groupValues?.get(1) ?: ""
+                privateKey = extractStr("privateKey")
+                publicKey = extractStr("publicKey")
+                shortId = extractStr("shortId")
+                tuicPassword = extractStr("tuicPassword")
+                socksPassword = extractStr("socksPassword")
+                hy2Password = extractStr("hy2Password")
+
+                if (privateKey.isNotEmpty() && publicKey.isNotEmpty() && shortId.isNotEmpty() && tuicPassword.isNotEmpty() && socksPassword.isNotEmpty()) {
+                    needGenerate = false
+                    if (hy2Password.isEmpty()) {
+                        hy2Password = randomHex(16)
+                        val persistData = mapOf("privateKey" to privateKey, "publicKey" to publicKey, "shortId" to shortId, "tuicPassword" to tuicPassword, "socksPassword" to socksPassword, "hy2Password" to hy2Password)
+                        Files.writeString(persistFile.toPath(), toJson(persistData))
+                    }
+                }
+            } catch (e: Exception) {}
         }
 
-        val certUrl = getEnv("CERT_URL")
-        val keyUrl = getEnv("KEY_URL")
+        if (needGenerate) {
+            val keypairOut = execCmd("$filePath/web generate reality-keypair")
+            val privM = "PrivateKey:\\s*(.*)".toRegex().find(keypairOut)
+            val pubM = "PublicKey:\\s*(.*)".toRegex().find(keypairOut)
+            if (privM != null && pubM != null) {
+                privateKey = privM.groupValues[1].trim()
+                publicKey = pubM.groupValues[1].trim()
+            }
+            shortId = randomHex(4)
+            tuicPassword = randomHex(16)
+            socksPassword = randomHex(8)
+            hy2Password = randomHex(16)
+
+            val persistData = mapOf("privateKey" to privateKey, "publicKey" to publicKey, "shortId" to shortId, "tuicPassword" to tuicPassword, "socksPassword" to socksPassword, "hy2Password" to hy2Password)
+            Files.writeString(persistFile.toPath(), toJson(persistData))
+        }
+
+        // Certificate logic
+        val domainCert = getEnv("DOMAIN_CERT")
+        val domainKey = getEnv("DOMAIN_KEY")
+        domainName = getEnv("DOMAIN_NAME", "www.bing.com")
+        if (domainName.isEmpty()) domainName = "www.bing.com"
+        
         customCertValid = false
-        if (certUrl.isNotEmpty() && keyUrl.isNotEmpty()) {
-            val certOk = downloadFile("cert.pem", certUrl, true)
-            val keyOk = downloadFile("private.key", keyUrl, true)
+        if (domainCert.isNotEmpty() && domainKey.isNotEmpty()) {
+            val certOk = downloadFile("custom_cert.pem", domainCert, true)
+            val keyOk = downloadFile("custom_private.key", domainKey, true)
             if (certOk && keyOk) customCertValid = true
         }
 
-        if (customCertValid) {
-            actualCertDomain = getEnv("CERT_DOMAIN", "bing.com")
-        } else {
-            actualCertDomain = "www.bing.com"
-            if (!File("$filePath/cert.pem").exists() || !File("$filePath/private.key").exists()) {
-                execCmd("openssl ecparam -genkey -name prime256v1 -out \"$filePath/private.key\"")
-                execCmd("openssl req -new -x509 -days 3650 -key \"$filePath/private.key\" -out \"$filePath/cert.pem\" -subj \"/CN=$actualCertDomain\"")
+        val certPath = if (customCertValid) "$filePath/custom_cert.pem" else "$filePath/tls_cert.pem"
+        val keyPath = if (customCertValid) "$filePath/custom_private.key" else "$filePath/tls_private.key"
+
+        if (!customCertValid) {
+            domainName = "www.bing.com"
+            if (!File(certPath).exists() || !File(keyPath).exists()) {
+                val predefinedPriv = "-----BEGIN EC PARAMETERS-----\nBggqhkjOPQMBBw==\n-----END EC PARAMETERS-----\n-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIM4792SEtPqIt1ywqTd/0bYidBqpYV/++siNnfBYsdUYoAoGCCqGSM49\nAwEHoUQDQgAE1kHafPj07rJG+HboH2ekAI4r+e6TL38GWASANnngZreoQDF16ARa\n/TsyLyFoPkhLxSbehH/NBEjHtSZGaDhMqQ==\n-----END EC PRIVATE KEY-----"
+                val predefinedCert = "-----BEGIN CERTIFICATE-----\nMIIBejCCASGgAwIBAgIUfWeQL3556PNJLp/veCFxGNj9crkwCgYIKoZIzj0EAwIw\nEzERMA8GA1UEAwwIYmluZy5jb20wHhcNMjUwOTE4MTgyMDIyWhcNMzUwOTE2MTgy\nMDIyWjATMREwDwYDVQQDDAhiaW5nLmNvbTBZMBMGByqGSM49AgEGCCqGSM49AwEH\nA0IABNZB2nz49O6yRvh26B9npACOK/nuky9/BlgEgDZ54Ga3qEAxdegEWv07Mi8h\naD5IS8Um3oR/zQRIx7UmRmg4TKmjUzBRMB0GA1UdDgQWBBTV1cFID7UISE7PLTBR\nBfGbgkrMNzAfBgNVHSMEGDAWgBTV1cFID7UISE7PLTBRBfGbgkrMNzAPBgNVHRMB\nAf8EBTADAQH/MAoGCCqGSM49BAMCA0cAMEQCIAIDAJvg0vd/ytrQVvEcSm6XTlB+\neQ6OFb9LbLYL9f+sAiAffoMbi4y/0YUSlTtz7as9S8/lciBF5VCUoVIKS+vX2g==\n-----END CERTIFICATE-----"
+                
+                try {
+                    execCmd("which openssl || where.exe openssl")
+                    execCmd("openssl ecparam -genkey -name prime256v1 -out \"$keyPath\"")
+                    execCmd("openssl req -new -x509 -days 3650 -key \"$keyPath\" -out \"$certPath\" -subj \"/CN=$domainName\"")
+                } catch (e: Exception) {}
+                
+                if (!File(certPath).exists()) {
+                    Files.writeString(Paths.get(keyPath), predefinedPriv)
+                    Files.writeString(Paths.get(certPath), predefinedCert)
+                }
             }
         }
 
+        // Core config build
         val argoPort = getEnv("ARGO_PORT", "8001").toIntOrNull() ?: 8001
+        val argoVmessPort = argoPort + 1
+        
         val config = mutableMapOf<String, Any>()
-        config["log"] = mapOf("disabled" to true, "level" to "info", "timestamp" to true)
+        config["log"] = mapOf("disabled" to true, "level" to "error", "timestamp" to true)
 
-        val inbounds = mutableListOf<Map<String, Any>>()
-        inbounds.add(mapOf(
-            "tag" to "vmess-ws-in", "type" to "vmess", "listen" to "::", "listen_port" to argoPort,
+        val inbounds = mutableListOf<MutableMap<String, Any>>()
+        
+        inbounds.add(mutableMapOf(
+            "tag" to "vless-ws-in", "type" to "vless", "listen" to "::", "listen_port" to argoPort,
+            "users" to listOf(mapOf("uuid" to uuid, "flow" to "")),
+            "transport" to mapOf("type" to "ws", "path" to "/vless-argo", "early_data_header_name" to "Sec-WebSocket-Protocol")
+        ))
+        inbounds.add(mutableMapOf(
+            "tag" to "vmess-ws-in", "type" to "vmess", "listen" to "::", "listen_port" to argoVmessPort,
             "users" to listOf(mapOf("uuid" to uuid)),
             "transport" to mapOf("type" to "ws", "path" to "/vmess-argo", "early_data_header_name" to "Sec-WebSocket-Protocol")
         ))
+        
         config["inbounds"] = inbounds
 
         val wireguardOut = mapOf(
@@ -376,63 +458,100 @@ object Launcher {
         config["endpoints"] = listOf(wireguardOut)
         config["outbounds"] = listOf(mapOf("type" to "direct", "tag" to "direct"))
 
-        config["route"] = mapOf(
-            "rule_set" to listOf(
-                mapOf("tag" to "netflix", "type" to "remote", "format" to "binary", "url" to "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-netflix.srs", "download_detour" to "direct"),
-                mapOf("tag" to "openai", "type" to "remote", "format" to "binary", "url" to "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/openai.srs", "download_detour" to "direct")
-            ),
-            "rules" to listOf(mapOf("rule_set" to listOf("openai", "netflix"), "outbound" to "wireguard-out")),
-            "final" to "direct"
+        // YouTube outbound detection logic
+        val ruleSet = mutableListOf(
+            mutableMapOf("tag" to "netflix", "type" to "remote", "format" to "binary", "url" to "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/netflix.srs", "download_detour" to "direct"),
+            mutableMapOf("tag" to "openai", "type" to "remote", "format" to "binary", "url" to "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/openai.srs", "download_detour" to "direct")
+        )
+        val rules = mutableListOf(
+            mutableMapOf("rule_set" to mutableListOf("openai", "netflix"), "outbound" to "wireguard-out")
         )
 
+        val ytWarpout = getEnv("YT_WARPOUT", "false").equals("true", ignoreCase = true)
+        var isYouTubeAccessible = true
+        if (ytWarpout) {
+            isYouTubeAccessible = false
+        } else {
+            try {
+                val code = execCmd("curl -o /dev/null -m 2 -s -w \"%{http_code}\" https://www.youtube.com").trim()
+                isYouTubeAccessible = (code == "200")
+            } catch (e: Exception) {
+                isYouTubeAccessible = false
+            }
+        }
+
+        if (!isYouTubeAccessible) {
+            ruleSet.add(mutableMapOf("tag" to "youtube", "type" to "remote", "format" to "binary", "url" to "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/youtube.srs", "download_detour" to "direct"))
+            val wgRule = rules.find { it["outbound"] == "wireguard-out" }
+            if (wgRule != null) {
+                @Suppress("UNCHECKED_CAST")
+                (wgRule["rule_set"] as MutableList<String>).add("youtube")
+            } else {
+                rules.add(mutableMapOf("rule_set" to mutableListOf("openai", "netflix", "youtube"), "outbound" to "wireguard-out"))
+            }
+        }
+
+        config["route"] = mapOf("rule_set" to ruleSet, "rules" to rules, "final" to "direct")
+
+        // Port protocols
         val realityPort = getEnvIntOrNull("REALITY_PORT")
         val realityDomain = getEnv("REALITY_DOMAIN", "www.iij.ad.jp")
         if (realityPort != null && realityPort > 0) {
-            inbounds.add(mapOf(
+            inbounds.add(mutableMapOf(
                 "tag" to "vless-in", "type" to "vless", "listen" to "::", "listen_port" to realityPort,
                 "users" to listOf(mapOf("uuid" to uuid, "flow" to "xtls-rprx-vision")),
                 "tls" to mapOf("enabled" to true, "server_name" to realityDomain,
-                    "reality" to mapOf("enabled" to true, "handshake" to mapOf("server" to realityDomain, "server_port" to 443), "private_key" to privateKey, "short_id" to listOf("")))
+                    "reality" to mapOf("enabled" to true, "handshake" to mapOf("server" to realityDomain, "server_port" to 443), "private_key" to privateKey, "short_id" to listOf(shortId)))
             ))
         }
+        
         val hy2Port = getEnvIntOrNull("HY2_PORT")
         if (hy2Port != null && hy2Port > 0) {
-            inbounds.add(mapOf(
+            val hy2Obfs = getEnv("HY2_OBFS", "false").equals("true", ignoreCase = true)
+            val hyConf = mutableMapOf<String, Any>(
                 "tag" to "hysteria-in", "type" to "hysteria2", "listen" to "::", "listen_port" to hy2Port,
                 "users" to listOf(mapOf("password" to uuid)), "masquerade" to "https://www.bing.com",
-                "tls" to mapOf("enabled" to true, "certificate_path" to "$filePath/cert.pem", "key_path" to "$filePath/private.key")
-            ))
+                "tls" to mapOf("enabled" to true, "certificate_path" to certPath, "key_path" to keyPath)
+            )
+            if (hy2Obfs) {
+                hyConf["obfs"] = mapOf("type" to "salamander", "password" to hy2Password)
+            }
+            inbounds.add(hyConf)
         }
+        
         val tuicPort = getEnvIntOrNull("TUIC_PORT")
         if (tuicPort != null && tuicPort > 0) {
-            inbounds.add(mapOf(
+            inbounds.add(mutableMapOf(
                 "tag" to "tuic-in", "type" to "tuic", "listen" to "::", "listen_port" to tuicPort,
                 "users" to listOf(mapOf("uuid" to uuid, "password" to tuicPassword)), "congestion_control" to "bbr",
-                "tls" to mapOf("enabled" to true, "alpn" to listOf("h3"), "certificate_path" to "$filePath/cert.pem", "key_path" to "$filePath/private.key")
+                "tls" to mapOf("enabled" to true, "alpn" to listOf("h3"), "certificate_path" to certPath, "key_path" to keyPath)
             ))
         }
+        
         val s5Port = getEnvIntOrNull("S5_PORT")
         if (s5Port != null && s5Port > 0) {
-            inbounds.add(mapOf(
+            inbounds.add(mutableMapOf(
                 "tag" to "s5-in", "type" to "socks", "listen" to "::", "listen_port" to s5Port,
-                "users" to listOf(mapOf("username" to uuid.take(8), "password" to uuid.takeLast(12)))
+                "users" to listOf(mapOf("username" to uuid.take(8), "password" to socksPassword))
             ))
         }
+        
         val anytlsPort = getEnvIntOrNull("ANYTLS_PORT")
         if (anytlsPort != null && anytlsPort > 0) {
-            inbounds.add(mapOf(
+            inbounds.add(mutableMapOf(
                 "tag" to "anytls-in", "type" to "anytls", "listen" to "::", "listen_port" to anytlsPort,
                 "users" to listOf(mapOf("password" to uuid)),
-                "tls" to mapOf("enabled" to true, "certificate_path" to "$filePath/cert.pem", "key_path" to "$filePath/private.key")
+                "tls" to mapOf("enabled" to true, "certificate_path" to certPath, "key_path" to keyPath)
             ))
         }
+        
         val anyrealityPort = getEnvIntOrNull("ANYREALITY_PORT")
         if (anyrealityPort != null && anyrealityPort > 0) {
-            inbounds.add(mapOf(
+            inbounds.add(mutableMapOf(
                 "tag" to "anyreality-in", "type" to "anytls", "listen" to "::", "listen_port" to anyrealityPort,
                 "users" to listOf(mapOf("password" to uuid)),
                 "tls" to mapOf("enabled" to true, "server_name" to realityDomain,
-                    "reality" to mapOf("enabled" to true, "handshake" to mapOf("server" to realityDomain, "server_port" to 443), "private_key" to privateKey, "short_id" to listOf("")))
+                    "reality" to mapOf("enabled" to true, "handshake" to mapOf("server" to realityDomain, "server_port" to 443), "private_key" to privateKey, "short_id" to listOf(shortId)))
             ))
         }
 
@@ -447,7 +566,7 @@ object Launcher {
         if (nezhaServer.isNotEmpty() && nezhaKey.isNotEmpty()) {
             if (nezhaPort.isNotEmpty()) {
                 val tlsFlag = if (listOf("443", "8443", "2096", "2087", "2083", "2053").contains(nezhaPort)) "--tls" else ""
-                val p = ProcessBuilder("$filePath/npm", "-s", "$nezhaServer:$nezhaPort", "-p", nezhaKey, tlsFlag)
+                val p = ProcessBuilder("$filePath/npm", "-s", "$nezhaServer:$nezhaPort", "-p", nezhaKey, tlsFlag, "--disable-auto-update", "--report-delay", "4", "--skip-conn", "--skip-procs")
                     .redirectOutput(File("/dev/null")).redirectErrorStream(true).start()
                 activeProcesses.add(p)
             } else {
@@ -548,54 +667,72 @@ object Launcher {
         val nodename = if (nameEnv.isNotEmpty()) "$nameEnv-$isp" else isp
         val subTxtBuilder = StringBuilder()
 
-        val uuid = getEnv("UUID", "ee0c49f3-0584-40fd-87d4-e76f0afcc81f")
+        val uuid = getEnv("UUID", "6c3eb34c-6800-4412-8513-de9b0b216339")
         val disableArgo = getEnv("DISABLE_ARGO", "false").equals("true", ignoreCase = true)
+        val argoAuth = getEnv("ARGO_AUTH")
 
         if (!disableArgo && !argoDomain.isNullOrEmpty()) {
-            val vmess = mapOf(
-                "v" to "2", "ps" to nodename, "add" to getEnv("CFIP", "spring.io"),
-                "port" to getEnv("CFPORT", "443"), "id" to uuid, "aid" to "0",
-                "scy" to "auto", "net" to "ws", "type" to "none",
-                "host" to argoDomain, "path" to "/vmess-argo?ed=2560",
-                "tls" to "tls", "sni" to argoDomain, "alpn" to "", "fp" to "firefox"
-            )
-            val encoded = Base64.getEncoder().encodeToString(toJson(vmess).toByteArray(Charsets.UTF_8))
-            subTxtBuilder.append("vmess://").append(encoded)
+            val cfIp = getEnv("CFIP", "sub.danfeng.eu.org")
+            val cfPort = getEnv("CFPORT", "443")
+            
+            val vlessPath = URLEncoder.encode("/vless-argo?ed=2560", "UTF-8")
+            val vlessLink = "vless://$uuid@$cfIp:$cfPort?encryption=none&security=tls&sni=$argoDomain&type=ws&host=$argoDomain&path=$vlessPath&fp=firefox#$nodename-VLESS"
+            subTxtBuilder.append(vlessLink)
+
+            if (argoAuth.isNotEmpty()) {
+                val vmessConfig = mapOf(
+                    "v" to "2", "ps" to "$nodename-VMess", "add" to cfIp, "port" to cfPort, "id" to uuid, "aid" to "0",
+                    "scy" to "auto", "net" to "ws", "type" to "none", "host" to argoDomain, "path" to "/vmess-argo?ed=2560",
+                    "tls" to "tls", "sni" to argoDomain, "alpn" to "", "fp" to "firefox"
+                )
+                val encodedVmess = Base64.getEncoder().encodeToString(toJson(vmessConfig).toByteArray(Charsets.UTF_8))
+                subTxtBuilder.append("\nvmess://").append(encodedVmess)
+            }
         }
 
         val tuicPort = getEnvIntOrNull("TUIC_PORT")
         if (tuicPort != null) {
             if (subTxtBuilder.isNotEmpty()) subTxtBuilder.append("\n")
             val insecureStr = if (customCertValid) "" else "&allow_insecure=1"
-            subTxtBuilder.append("tuic://$uuid:$tuicPassword@$serverIp:$tuicPort?sni=$actualCertDomain&congestion_control=bbr&udp_relay_mode=native&alpn=h3$insecureStr#$nodename")
+            subTxtBuilder.append("tuic://$uuid:$tuicPassword@$serverIp:$tuicPort?sni=$domainName&congestion_control=bbr&udp_relay_mode=native&alpn=h3$insecureStr#$nodename")
         }
+        
         val hy2Port = getEnvIntOrNull("HY2_PORT")
         if (hy2Port != null) {
             if (subTxtBuilder.isNotEmpty()) subTxtBuilder.append("\n")
             val insecureStr = if (customCertValid) "" else "&insecure=1"
-            subTxtBuilder.append("hysteria2://$uuid@$serverIp:$hy2Port/?sni=$actualCertDomain$insecureStr&alpn=h3&obfs=none#$nodename")
+            val hy2Obfs = getEnv("HY2_OBFS", "false").equals("true", ignoreCase = true)
+            if (hy2Obfs) {
+                subTxtBuilder.append("hysteria2://$uuid@$serverIp:$hy2Port/?sni=$domainName&obfs=salamander&obfs-password=$hy2Password$insecureStr#$nodename")
+            } else {
+                subTxtBuilder.append("hysteria2://$uuid@$serverIp:$hy2Port/?sni=$domainName&obfs=none$insecureStr#$nodename")
+            }
         }
+        
         val realityPort = getEnvIntOrNull("REALITY_PORT")
         val realityDomain = getEnv("REALITY_DOMAIN", "www.iij.ad.jp")
         if (realityPort != null) {
             if (subTxtBuilder.isNotEmpty()) subTxtBuilder.append("\n")
-            subTxtBuilder.append("vless://$uuid@$serverIp:$realityPort?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$realityDomain&fp=firefox&pbk=$publicKey&type=tcp&headerType=none#$nodename")
+            subTxtBuilder.append("vless://$uuid@$serverIp:$realityPort?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$realityDomain&fp=firefox&pbk=$publicKey&sid=$shortId&type=tcp&headerType=none#$nodename")
         }
+        
         val anytlsPort = getEnvIntOrNull("ANYTLS_PORT")
         if (anytlsPort != null) {
             if (subTxtBuilder.isNotEmpty()) subTxtBuilder.append("\n")
             val insecureStr = if (customCertValid) "" else "&insecure=1&allowInsecure=1"
-            subTxtBuilder.append("anytls://$uuid@$serverIp:$anytlsPort?security=tls&sni=$actualCertDomain$insecureStr#$nodename")
+            subTxtBuilder.append("anytls://$uuid@$serverIp:$anytlsPort?security=tls&sni=$domainName$insecureStr#$nodename")
         }
+        
         val anyrealityPort = getEnvIntOrNull("ANYREALITY_PORT")
         if (anyrealityPort != null) {
             if (subTxtBuilder.isNotEmpty()) subTxtBuilder.append("\n")
-            subTxtBuilder.append("anytls://$uuid@$serverIp:$anyrealityPort?security=reality&sni=$realityDomain&fp=firefox&pbk=$publicKey&type=tcp&headerType=none#$nodename")
+            subTxtBuilder.append("anytls://$uuid@$serverIp:$anyrealityPort?security=reality&sni=$realityDomain&fp=firefox&pbk=$publicKey&sid=$shortId&type=tcp&headerType=none#$nodename")
         }
+        
         val s5Port = getEnvIntOrNull("S5_PORT")
         if (s5Port != null) {
             if (subTxtBuilder.isNotEmpty()) subTxtBuilder.append("\n")
-            val s5Auth = Base64.getEncoder().encodeToString("${uuid.take(8)}:${uuid.takeLast(12)}".toByteArray(Charsets.UTF_8))
+            val s5Auth = Base64.getEncoder().encodeToString("${uuid.take(8)}:$socksPassword".toByteArray(Charsets.UTF_8))
             subTxtBuilder.append("socks://$s5Auth@$serverIp:$s5Port#$nodename")
         }
 
